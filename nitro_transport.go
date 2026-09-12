@@ -39,7 +39,11 @@ type feedConn struct {
 func dialFeed(ctx context.Context, url string, nextSequenceNumber uint64) (*feedConn, error) {
 	header := make(http.Header)
 	header.Set("Arbitrum-Feed-Client-Version", "2")
-	header.Set("Arbitrum-Requested-Sequence-Number", strconv.FormatUint(nextSequenceNumber, 10))
+	// 尚无游标时不指定起点。部分 relay 会接受握手，但立即断开显式请求 0 的连接。
+	// 收到消息后才用有效的下一序号续传；不能假定省略该头与传 0 等价。
+	if nextSequenceNumber != 0 {
+		header.Set("Arbitrum-Requested-Sequence-Number", strconv.FormatUint(nextSequenceNumber, 10))
+	}
 
 	// 仅改变本次请求的扩展名，不修改 wsflate 包的全局变量。
 	offer := wsflate.DefaultParameters.Option()

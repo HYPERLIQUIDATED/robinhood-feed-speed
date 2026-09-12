@@ -350,7 +350,7 @@ func runWebsocketSource(ctx context.Context, tracker *Tracker, source sourceConf
 		source.ReconnectInterval = 2 * time.Second
 	}
 
-	// 每个源独立续传；首次请求 0，重连使用已收到的最大 feed 序号加一。
+	// 每个源独立续传；0 表示尚无游标、握手不传序号，重连使用已收到的最大序号加一。
 	var nextSequenceNumber uint64
 	for {
 		if ctx.Err() != nil {
@@ -370,7 +370,11 @@ func runWebsocketSource(ctx context.Context, tracker *Tracker, source sourceConf
 
 		tracker.SetConnected(source.Name, source.URL)
 		connectedAt := time.Now()
-		log.Printf("[%s] connected compression=%s requested_sequence=%d", source.Name, conn.compressionName(), nextSequenceNumber)
+		if nextSequenceNumber == 0 {
+			log.Printf("[%s] connected compression=%s requested_sequence=omitted", source.Name, conn.compressionName())
+		} else {
+			log.Printf("[%s] connected compression=%s requested_sequence=%d", source.Name, conn.compressionName(), nextSequenceNumber)
+		}
 		err = consumeWebsocket(ctx, tracker, conn, source, debug, &nextSequenceNumber)
 		_ = conn.Close()
 		tracker.SetDisconnected(source.Name, err)

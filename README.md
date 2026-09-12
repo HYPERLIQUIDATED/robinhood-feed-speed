@@ -60,12 +60,12 @@ The connection layer sends `Arbitrum-Feed-Client-Version: 2` and negotiates **`A
 Connection logs show the negotiated mode:
 
 ```text
-[feeder] connected compression=Arbitrum-permessage-deflate requested_sequence=0
+[feeder] connected compression=Arbitrum-permessage-deflate requested_sequence=omitted
 ```
 
 `compression=none` means no compression was negotiated, not necessarily an error. A Nitro server configured to require compression can return HTTP 101 and then immediately close the connection if negotiation fails. Disconnect logs include the connection duration and the number of fully decoded data messages. A `connected` line only confirms the handshake, not that feed data has been received.
 
-Each source tracks its own next sequence number for reconnects. The initial request is `0`; this is **not** a latest-only instruction and the relay may send its cached backlog. Reconnection requests the maximum observed sequence plus one. Startup/reconnect catch-up samples should not be interpreted as steady-state feed latency. Sequence tracking is in memory only and is not a durable, gap-checked node cursor.
+Each source tracks its own next sequence number for reconnects. On the first connection, `Arbitrum-Requested-Sequence-Number` is **omitted** because no cursor is known yet. Some relays accept the handshake and immediately disconnect when this header is explicitly set to `0`; omission and `0` are not interchangeable. After data has been received, reconnection requests the maximum observed sequence plus one. The relay chooses the initial starting point and may send cached backlog, so startup/reconnect catch-up samples should not be interpreted as steady-state feed latency. Sequence tracking is in memory only and is not a durable, gap-checked node cursor.
 
 Raw Nitro feeds push data after the handshake and normally do not need `-source-subscribe`. Existing custom subscription messages are still supported. The transport handles fragmented messages, ping/pong, close frames, handshake-buffered data, and a 15 MiB limit on both encoded and decoded messages. Arrival time remains measured after reading/decompressing a complete message and before JSON parsing; it is not raw TCP arrival time.
 

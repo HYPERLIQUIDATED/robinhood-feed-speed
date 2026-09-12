@@ -117,6 +117,24 @@ func TestFeedCompressedAndPlain(t *testing.T) {
 	}
 }
 
+func TestFeedInitialConnectionOmitsSequenceHeader(t *testing.T) {
+	url := testFeedServer(t, false, func(conn net.Conn, _ *bufio.ReadWriter, r *http.Request) {
+		// 复现实际 relay 行为：握手完成后拒绝没有有效游标的显式序号请求。
+		if _, present := r.Header[http.CanonicalHeaderKey("Arbitrum-Requested-Sequence-Number")]; present {
+			return
+		}
+		_ = ws.WriteFrame(conn, ws.NewTextFrame([]byte(`{"version":1,"messages":[]}`)))
+	})
+	conn, err := dialFeed(context.Background(), url, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("initial connection failed: %v", err)
+	}
+}
+
 func TestFeedFragmentedCompressionWithPing(t *testing.T) {
 	payload := []byte(strings.Repeat(`{"version":1,"messages":[{"sequenceNumber":123}]}`, 20))
 	frame := compressedFeedFrame(t, payload)
@@ -226,7 +244,7 @@ func TestFeedReconnectAndCancellation(t *testing.T) {
 			url := testFeedServer(t, true, func(conn net.Conn, _ *bufio.ReadWriter, r *http.Request) {
 				sequence := r.Header.Get("Arbitrum-Requested-Sequence-Number")
 				requests <- sequence
-				if sequence == "0" {
+				if sequence == "" {
 					_ = ws.WriteFrame(conn, frame)
 					return // 模拟 EOF 后的自动重连。
 				}
@@ -240,7 +258,7 @@ func TestFeedReconnectAndCancellation(t *testing.T) {
 					Name: tc.name, URL: url, ReconnectInterval: time.Millisecond,
 				}, false)
 			}()
-			for _, want := range []string{"0", fmt.Sprint(tc.seq + 1)} {
+			for _, want := range []string{"", fmt.Sprint(tc.seq + 1)} {
 				select {
 				case got := <-requests:
 					if got != want {
