@@ -37,6 +37,8 @@ A block is included in the completed-block statistics only after it has been rec
 
 At least one `-source name=url` argument is required. In practice, two or more sources are usually needed to compare block arrival latency.
 
+Build with `go build -o speed .`, or use `go run .` as below. Do not use `go run main.go`: the Nitro transport and dictionary are in separate Go files.
+
 ```bash
 go run . \
   -source official=wss://feed.mainnet.chain.robinhood.com \
@@ -50,6 +52,32 @@ Each source follows this format:
 ```
 
 The source name is used in block details, latency summaries, and Prometheus metric labels.
+
+## Nitro feed compatibility
+
+The connection layer sends `Arbitrum-Feed-Client-Version: 2` and negotiates **`Arbitrum-permessage-deflate` with Nitro's static dictionary**. Ordinary `permessage-deflate` is not sufficient. Servers that accept an uncompressed connection remain supported; the client does not force compression when the server declines it.
+
+Connection logs show the negotiated mode:
+
+```text
+[feeder] connected compression=Arbitrum-permessage-deflate requested_sequence=0
+```
+
+`compression=none` means no compression was negotiated, not necessarily an error. A Nitro server configured to require compression can return HTTP 101 and then immediately close the connection if negotiation fails. Disconnect logs include the connection duration and the number of fully decoded data messages. A `connected` line only confirms the handshake, not that feed data has been received.
+
+Each source tracks its own next sequence number for reconnects. The initial request is `0`; this is **not** a latest-only instruction and the relay may send its cached backlog. Reconnection requests the maximum observed sequence plus one. Startup/reconnect catch-up samples should not be interpreted as steady-state feed latency. Sequence tracking is in memory only and is not a durable, gap-checked node cursor.
+
+Raw Nitro feeds push data after the handshake and normally do not need `-source-subscribe`. Existing custom subscription messages are still supported. The transport handles fragmented messages, ping/pong, close frames, handshake-buffered data, and a 15 MiB limit on both encoded and decoded messages. Arrival time remains measured after reading/decompressing a complete message and before JSON parsing; it is not raw TCP arrival time.
+
+Connections use the supplied `ws://` or `wss://` URL directly, preserving the query string. TLS certificates are verified. Unlike the previous Gorilla default dialer, this transport does not read `HTTP_PROXY`/`HTTPS_PROXY` environment variables.
+
+The unchanged dictionary bytes in `nitro_dictionary.go` come from [OffchainLabs/nitro at a6181559](https://github.com/OffchainLabs/nitro/blob/a618155919315241665356fe60f3cd00d66d5e46/wsbroadcastserver/dictionary.go). Its copyright notice and Business Source License 1.1 are retained in [third_party/nitro/LICENSE.md](third_party/nitro/LICENSE.md). The dictionary is not covered by an assumed permissive license.
+
+Run compatibility and concurrency tests with:
+
+```bash
+go test -race ./...
+```
 
 ## Viewing block latency
 

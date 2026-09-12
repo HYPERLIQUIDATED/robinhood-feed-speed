@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/gobwas/ws"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -350,13 +350,15 @@ func runWebsocketSource(ctx context.Context, tracker *Tracker, source sourceConf
 		source.ReconnectInterval = 2 * time.Second
 	}
 
+	// 每个源独立续传；首次请求 0，重连使用已收到的最大 feed 序号加一。
+	var nextSequenceNumber uint64
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		log.Printf("[%s] connecting %s", source.Name, source.URL)
-		conn, _, err := websocket.DefaultDialer.Dial(source.URL, nil)
+		log.Printf("[%s] connecting", source.Name)
+		conn, err := dialFeed(ctx, source.URL, nextSequenceNumber)
 		if err != nil {
 			tracker.SetDisconnected(source.Name, err)
 			log.Printf("[%s] connect failed: %v", source.Name, err)
@@ -367,15 +369,16 @@ func runWebsocketSource(ctx context.Context, tracker *Tracker, source sourceConf
 		}
 
 		tracker.SetConnected(source.Name, source.URL)
-		log.Printf("[%s] connected", source.Name)
-		err = consumeWebsocket(ctx, tracker, conn, source, debug)
+		connectedAt := time.Now()
+		log.Printf("[%s] connected compression=%s requested_sequence=%d", source.Name, conn.compressionName(), nextSequenceNumber)
+		err = consumeWebsocket(ctx, tracker, conn, source, debug, &nextSequenceNumber)
 		_ = conn.Close()
 		tracker.SetDisconnected(source.Name, err)
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
-			log.Printf("[%s] disconnected: %v", source.Name, err)
+			log.Printf("[%s] disconnected after=%s messages=%d: %v", source.Name, time.Since(connectedAt), conn.messagesRead, err)
 		}
 		if !waitOrDone(ctx, source.ReconnectInterval) {
 			return
@@ -383,24 +386,8 @@ func runWebsocketSource(ctx context.Context, tracker *Tracker, source sourceConf
 	}
 }
 
-func consumeWebsocket(ctx context.Context, tracker *Tracker, conn *websocket.Conn, source sourceConfig, debug bool) error {
-	conn.SetReadLimit(MaxMessageSize)
-	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(pongWait))
-	})
-
-	for _, payload := range source.SubscriptionMessages {
-		_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
-			return err
-		}
-	}
-
-	stopPing := make(chan struct{})
-	go pingWebsocket(ctx, conn, stopPing)
-	defer close(stopPing)
-
+func consumeWebsocket(ctx context.Context, tracker *Tracker, conn *feedConn, source sourceConfig, debug bool, nextSequenceNumber *uint64) error {
+	// 取消时也中断订阅消息的写入，不只中断后续读取。
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -410,6 +397,15 @@ func consumeWebsocket(ctx context.Context, tracker *Tracker, conn *websocket.Con
 		case <-done:
 		}
 	}()
+	for _, payload := range source.SubscriptionMessages {
+		if err := conn.WriteMessage(ws.OpText, []byte(payload)); err != nil {
+			return err
+		}
+	}
+
+	stopPing := make(chan struct{})
+	go pingWebsocket(ctx, conn, stopPing)
+	defer close(stopPing)
 
 	for {
 		messageType, data, err := conn.ReadMessage()
@@ -417,7 +413,7 @@ func consumeWebsocket(ctx context.Context, tracker *Tracker, conn *websocket.Con
 			return err
 		}
 		receivedAt := time.Now()
-		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
+		if messageType != ws.OpText && messageType != ws.OpBinary {
 			continue
 		}
 		blocks, err := extractBlocks(data)
@@ -428,6 +424,10 @@ func consumeWebsocket(ctx context.Context, tracker *Tracker, conn *websocket.Con
 			continue
 		}
 		for _, block := range blocks {
+			// 不把 L1/L2 区块高度当作 feed 序号；重复消息不能倒退续传位置。
+			if block.SequenceNumber >= *nextSequenceNumber && block.SequenceNumber != ^uint64(0) {
+				*nextSequenceNumber = block.SequenceNumber + 1
+			}
 			result := tracker.RecordBlock(source.Name, block, receivedAt)
 			if result.CompletedLine != "" {
 				log.Print(result.CompletedLine)
@@ -448,7 +448,7 @@ func consumeWebsocket(ctx context.Context, tracker *Tracker, conn *websocket.Con
 	}
 }
 
-func pingWebsocket(ctx context.Context, conn *websocket.Conn, stop <-chan struct{}) {
+func pingWebsocket(ctx context.Context, conn *feedConn, stop <-chan struct{}) {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
 	for {
@@ -458,8 +458,7 @@ func pingWebsocket(ctx context.Context, conn *websocket.Conn, stop <-chan struct
 		case <-stop:
 			return
 		case <-ticker.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := conn.WriteMessage(ws.OpPing, nil); err != nil {
 				_ = conn.Close()
 				return
 			}
